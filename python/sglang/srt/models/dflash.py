@@ -353,14 +353,20 @@ class DFlashDraftModel(nn.Module):
         # concat(K * hidden_size) -> hidden_size, where K is the number of target-layer
         # feature tensors concatenated per token (not necessarily equal to num_layers).
         draft_config = parse_dflash_draft_config(draft_hf_config=config)
-        target_num_layers = (
-            int(draft_config.num_target_layers)
-            if draft_config.num_target_layers is not None
-            else num_layers
-        )
-        target_layer_ids = draft_config.resolve_target_layer_ids(
-            target_num_layers=target_num_layers, draft_num_layers=num_layers
-        )
+        if draft_config.target_layer_ids is not None:
+            # `fc` is sized by len(target_layer_ids); the ids are range-validated
+            # against the real served target in ModelRunner (not this draft config).
+            target_layer_ids = list(draft_config.target_layer_ids)
+        else:
+            # Auto-building ids needs a target layer count; fall back to draft depth.
+            target_num_layers = (
+                int(draft_config.num_target_layers)
+                if draft_config.num_target_layers is not None
+                else num_layers
+            )
+            target_layer_ids = draft_config.resolve_target_layer_ids(
+                target_num_layers=target_num_layers, draft_num_layers=num_layers
+            )
         num_context_features = len(target_layer_ids)
 
         self.num_context_features = int(num_context_features)

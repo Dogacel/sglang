@@ -310,11 +310,8 @@ class DFlashWorkerV2(BaseSpecWorker):
                 getattr(server_args, "speculative_dspark_confidence_threshold", 0.0)
                 or 0.0
             )
-            # The DSpark checkpoint ships no lm_head of its own; the draft emits
-            # tokens in the target vocab space, so alias the target model's
-            # lm_head (BF16 even for FP8 targets). Without this the draft lm_head
-            # stays at initialization and the Markov base logits are garbage,
-            # collapsing accept length to ~1 (a slowdown).
+            # The DSpark checkpoint ships no lm_head; the draft works in the target
+            # vocab space, so alias the target's lm_head for the Markov base logits.
             target_model = self._target_worker.model_runner.model
             target_lm_head = getattr(target_model, "lm_head", None)
             if target_lm_head is None or not hasattr(target_lm_head, "weight"):

@@ -66,7 +66,7 @@ class Qwen3DSparkConfidenceHead(nn.Module):
         return self.proj(features.float()).squeeze(-1)
 
 
-class Qwen3DSparkDraftModel(DFlashDraftModel):
+class Qwen3DSparkModel(DFlashDraftModel):
     """DFlash-style Qwen3 draft backbone with DSpark Markov/confidence heads."""
 
     def __init__(
@@ -117,20 +117,6 @@ class Qwen3DSparkDraftModel(DFlashDraftModel):
     def num_dspark_layers(self) -> int:
         return len(self.layers)
 
-    # The DSpark checkpoint ships the DFlash backbone under torchspec names.
-    # Remap them to the parameter names DFlashDraftModel.load_weights expects.
-    _BACKBONE_NAME_MAP = {
-        "context_proj.": "fc.",
-        "context_norm.": "hidden_norm.",
-        "final_norm.": "norm.",
-    }
-
-    def _remap_backbone_name(self, name: str) -> str:
-        for src, dst in self._BACKBONE_NAME_MAP.items():
-            if name.startswith(src):
-                return dst + name[len(src) :]
-        return name
-
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         markov_weights = []
         confidence_weights = []
@@ -147,7 +133,7 @@ class Qwen3DSparkDraftModel(DFlashDraftModel):
             elif name.startswith("embed_tokens."):
                 continue
             else:
-                backbone_weights.append((self._remap_backbone_name(name), tensor))
+                backbone_weights.append((name, tensor))
 
         super().load_weights(backbone_weights)
 
@@ -163,4 +149,4 @@ class Qwen3DSparkDraftModel(DFlashDraftModel):
                 param.data.copy_(loaded)
 
 
-EntryClass = Qwen3DSparkDraftModel
+EntryClass = Qwen3DSparkModel

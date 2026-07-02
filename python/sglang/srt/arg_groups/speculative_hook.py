@@ -33,7 +33,7 @@ def _resolve_speculative_algorithm_alias(
             for arch in draft_archs
         )
         is_qwen3_dspark_draft = any(
-            arch == "Qwen3DSparkDraftModel" for arch in draft_archs
+            arch == "Qwen3DSparkModel" for arch in draft_archs
         )
 
     if speculative_algorithm == "EAGLE3" and is_gemma4_draft:
@@ -54,7 +54,7 @@ def _resolve_speculative_algorithm_alias(
 
     if speculative_algorithm == "DSPARK" and is_qwen3_dspark_draft:
         logger.info(
-            "Detected Qwen3DSparkDraftModel draft; "
+            "Detected Qwen3 DSpark draft; "
             "routing --speculative-algorithm DSPARK to DFLASH."
         )
         return "DFLASH"

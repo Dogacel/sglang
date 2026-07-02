@@ -446,13 +446,22 @@ def parse_dflash_draft_config(*, draft_hf_config: Any) -> DFlashDraftConfig:
         field_name="DFLASH draft num_hidden_layers",
         min_value=1,
     )
-    raw_num_target_layers = dflash_cfg.get(
-        "num_target_layers",
+    # Target's total layer count. DSpark configs put it in `target_num_hidden_layers`
+    # (`num_target_layers` there is the selected count); legacy DFlash uses
+    # `num_target_layers` for the total. Prefer the former, fall back to the latter.
+    raw_num_target_layers = None
+    for _candidate in (
+        dflash_cfg.get("target_num_hidden_layers"),
+        _cfg_get(draft_hf_config, "target_num_hidden_layers", None),
+        dflash_cfg.get("num_target_layers"),
         _cfg_get(draft_hf_config, "num_target_layers", None),
-    )
+    ):
+        if _candidate is not None:
+            raw_num_target_layers = _candidate
+            break
     num_target_layers = _parse_optional_int(
         raw_num_target_layers,
-        field_name="DFLASH draft num_target_layers",
+        field_name="DFLASH draft target_num_hidden_layers",
         min_value=1,
     )
 
