@@ -320,6 +320,20 @@ class DFlashWorkerV2(BaseSpecWorker):
                     "with a `weight` to alias into the draft head."
                 )
             self.draft_model.lm_head = target_lm_head
+            # Replicate the small Markov weights on every rank so the sequential refine
+            # loop runs collective-free (needs unpadded vocab shards: vocab_size % tp == 0).
+            tp = get_tensor_model_parallel_world_size()
+            mw1 = self.draft_model.markov_head.markov_w1.weight
+            mw2 = self.draft_model.markov_head.markov_w2.weight
+            if tp > 1:
+                assert mw1.shape[0] * tp == self._draft_vocab_size, (
+                    "DSpark Markov replication needs unpadded vocab shards "
+                    f"(vocab_size={self._draft_vocab_size}, tp={tp})."
+                )
+                mw1 = tensor_model_parallel_all_gather(mw1.contiguous(), dim=0)
+                mw2 = tensor_model_parallel_all_gather(mw2.contiguous(), dim=0)
+            self._markov_w1_full = mw1[: self._draft_vocab_size].contiguous()
+            self._markov_w2_full = mw2[: self._draft_vocab_size].contiguous()
             if self.tp_rank == 0:
                 logger.info(
                     "Qwen3 DSpark heads enabled (Markov rank=%s, confidence_threshold=%s); "
@@ -781,7 +795,6 @@ class DFlashWorkerV2(BaseSpecWorker):
         candidates = self._markov_candidates_buf[:bs]
         markov_embeds = self._markov_embeds_buf[:bs]
 
-        markov_head = self.draft_model.markov_head
         confidence_head = self.draft_model.confidence_head
         lm_head = self.draft_model.lm_head
         tp_size = get_tensor_model_parallel_world_size()
@@ -802,15 +815,18 @@ class DFlashWorkerV2(BaseSpecWorker):
             first_tokens = bonus_tokens[:, 0].to(torch.int64)
         candidates[:, 0].copy_(first_tokens)
 
+        w1_full = self._markov_w1_full
+        w2_full = self._markov_w2_full
         with torch.inference_mode():
+            # One full-vocab gather for the base logits (like DFlash); the sequential
+            # Markov refine then runs collective-free on the replicated weights.
             base_logits = _gather_full_vocab(F.linear(block_hidden, lm_head.weight))
             prev_tokens = candidates[:, 0]
             for i in range(block_size):
-                prev_embed = markov_head.get_prev_embeddings(prev_tokens)
+                prev_embed = F.embedding(prev_tokens, w1_full)
                 markov_embeds[:, i].copy_(prev_embed)
-                bias = _gather_full_vocab(markov_head.project_bias(prev_embed))
-                bias.add_(base_logits[:, i])
-                next_tokens = torch.argmax(bias, dim=-1)
+                logits_i = base_logits[:, i] + F.linear(prev_embed, w2_full)
+                next_tokens = torch.argmax(logits_i[..., :vocab_size], dim=-1)
                 if i + 1 < block_size:
                     candidates[:, i + 1].copy_(next_tokens)
                 prev_tokens = next_tokens
