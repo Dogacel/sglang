@@ -410,6 +410,11 @@ class DFlashWorkerV2(BaseSpecWorker):
                 logger.info("DFLASH draft greedy head kept eager (reason=%s).", reason)
             return None
 
+        if self._use_qwen3_dspark:
+            # DSpark refines candidates via its Markov head; the plain greedy
+            # head's full-vocab argmax would be computed in-graph and discarded
+            # every step. Keep the draft graph free of it.
+            return _eager("dspark refines via markov head")
         if get_tp_group().world_size != 1:
             return _eager("tp>1")
         if self.block_size <= 1:
