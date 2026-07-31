@@ -112,6 +112,9 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
 
 class LlamaModel(nn.Module):
+    # Overridable by draft variants (e.g. depth-gated layers).
+    decoder_layer_class = LlamaDecoderLayer
+
     def __init__(
         self,
         config: LlamaConfig,
@@ -174,7 +177,7 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                LlamaDecoderLayer(config, i, quant_config, prefix)
+                self.decoder_layer_class(config, i, quant_config, prefix)
                 for i in range(config.num_hidden_layers)
             ]
         )
@@ -244,6 +247,9 @@ class LlamaModel(nn.Module):
 
 
 class LlamaForCausalLMEagle3(LlamaForCausalLM):
+    # Overridable by draft variants (e.g. depth-gated models).
+    model_class = LlamaModel
+
     def __init__(
         self,
         config: LlamaConfig,
@@ -261,7 +267,7 @@ class LlamaForCausalLMEagle3(LlamaForCausalLM):
             get_server_args().speculative_draft_window_size
         )
 
-        self.model = LlamaModel(
+        self.model = self.model_class(
             config,
             quant_config=quant_config,
             prefix=add_prefix("model", prefix),

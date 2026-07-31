@@ -194,6 +194,19 @@ try:
 except ImportError:
     pass
 
+# TorchSpec depth-gated EAGLE-3 draft checkpoints ship with
+# ``model_type: "llama_gated"``. They reuse the Llama config schema plus
+# passthrough extras (``fc_norm``, ``norm_output``, ``draft_vocab_size``).
+try:
+    from transformers import LlamaConfig as _HFLlamaConfig
+
+    class _LlamaGatedConfigAlias(_HFLlamaConfig):
+        model_type = "llama_gated"
+
+    _CONFIG_REGISTRY["llama_gated"] = _LlamaGatedConfigAlias
+except ImportError:
+    pass
+
 for name, cls in _CONFIG_REGISTRY.items():
     try:
         AutoConfig.register(name, cls)
