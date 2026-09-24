@@ -14,6 +14,7 @@ from torch import nn
 from sglang.kernels.ops.speculative.dflash import selector_walk_triton
 from sglang.srt.configs.laguna import normalize_gating
 from sglang.srt.distributed.communication_op import tensor_model_parallel_all_gather
+from sglang.srt.environ import envs
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
@@ -639,7 +640,15 @@ class DFlashDraftModel(nn.Module):
         num_context_features = len(target_layer_ids)
 
         self.num_context_features = int(num_context_features)
-        if self.is_nemotron_35_draft:
+        self.use_parallel_context_proj = self.is_nemotron_35_draft or (
+            envs.SGLANG_DFLASH_FP8_CONTEXT_PROJ.get()
+            and type(self).project_target_hidden
+            is DFlashDraftModel.project_target_hidden
+            and quant_config is not None
+            and quant_config.get_name() == "fp8"
+            and not quant_config.is_checkpoint_fp8_serialized
+        )
+        if self.use_parallel_context_proj:
             fc_prefix = f"{prefix}.fc" if prefix else "fc"
             self.fc = ReplicatedLinear(
                 self.num_context_features * hidden_size,
@@ -710,7 +719,9 @@ class DFlashDraftModel(nn.Module):
     def project_target_hidden(self, target_hidden: torch.Tensor) -> torch.Tensor:
         """Project concatenated target-layer hidden states into draft hidden_size."""
         expected = int(
-            self.fc.input_size if self.is_nemotron_35_draft else self.fc.in_features
+            self.fc.input_size
+            if self.use_parallel_context_proj
+            else self.fc.in_features
         )
         if target_hidden.ndim != 2 or int(target_hidden.shape[-1]) != expected:
             raise ValueError(
@@ -722,7 +733,7 @@ class DFlashDraftModel(nn.Module):
                 "the draft checkpoint/config expects."
             )
         projected = self.fc(target_hidden)
-        if self.is_nemotron_35_draft:
+        if self.use_parallel_context_proj:
             projected = projected[0]
         return self.hidden_norm(projected)
 
