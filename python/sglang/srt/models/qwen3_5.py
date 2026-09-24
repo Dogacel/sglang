@@ -397,6 +397,9 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self._bind_packed_weight_loaders(self.in_proj_qkvz)
         self._bind_packed_weight_loaders(self.in_proj_ba)
         self._fused_in_proj_weight: Optional[torch.Tensor] = None
+        self._fp8_fused_in_proj = None
+        self._fp8_fused_in_proj_checked = False
+        self._fp8_fused_in_proj_enabled = envs.SGLANG_QWEN35_FP8_FUSED_IN_PROJ.get()
         self._fused_in_proj_qkvz_width = 0
         self._fused_in_proj_ba_width = 0
         self._fused_in_proj_scale: Optional[torch.Tensor] = None
@@ -697,6 +700,40 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         ba.weight.data = fused[self._fused_in_proj_qkvz_width :]
         self._fused_in_proj_weight = fused
 
+    def _maybe_init_fp8_fused_in_proj(self) -> None:
+        """Combine compatible channelwise FP8 QKVZ and gate projections."""
+        if self._fp8_fused_in_proj_checked:
+            return
+        self._fp8_fused_in_proj_checked = True
+        if not _is_cuda or get_lora().enable_lora or get_lora().lora_paths:
+            return
+        from sglang.srt.layers.quantization.fp8 import Fp8LinearMethod
+
+        qkvz, ba = self.in_proj_qkvz, self.in_proj_ba
+        for linear in (qkvz, ba):
+            method = linear.quant_method
+            if not (
+                isinstance(method, Fp8LinearMethod)
+                and not method.block_quant
+                and not method.use_marlin
+                and method.cutlass_fp8_supported
+                and linear.weight.dtype == torch.float8_e4m3fn
+                and linear.weight.stride(0) == 1
+                and linear.weight_scale.numel() == linear.weight.shape[1]
+                and linear.input_scale is None
+                and linear.bias is None
+            ):
+                return
+        width = qkvz.weight.shape[1]
+        weight = torch.cat([qkvz.weight.t(), ba.weight.t()], dim=0).contiguous().t()
+        scale = torch.cat(
+            [qkvz.weight_scale.reshape(-1), ba.weight_scale.reshape(-1)]
+        ).reshape(1, -1)
+        self._fp8_fused_in_proj = (weight, scale, width)
+        logger.info(
+            "Enabled FP8 fused GDN QKVZ+BA projection, output width=%d", weight.shape[1]
+        )
+
     def _finalize_fused_fp8_in_proj(self) -> bool:
         """Pack loaded Quark per-channel FP8 projections without requantizing."""
         from aiter.ops.shuffle import shuffle_weight
@@ -778,6 +815,17 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         )
 
     def _forward_input_proj(self, hidden_states: torch.Tensor):
+        if self._fp8_fused_in_proj_enabled:
+            self._maybe_init_fp8_fused_in_proj()
+            if self._fp8_fused_in_proj is not None and hidden_states.shape[0] <= 1024:
+                from sglang.srt.layers.quantization.fp8_utils import apply_fp8_linear
+
+                weight, scale, width = self._fp8_fused_in_proj
+                output = apply_fp8_linear(
+                    hidden_states, weight, scale, cutlass_fp8_supported=True
+                )
+                return output[:, :width], output[:, width:]
+
         if _use_aiter and self._fused_in_proj_weight is not None:
             # Unquantized BF16 projections consume the bf16 side of the fused
             # AR+RMSNorm tuple; one aiter GEMM replaces the two separate
