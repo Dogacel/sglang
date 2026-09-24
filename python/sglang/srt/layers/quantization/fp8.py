@@ -381,8 +381,14 @@ class Fp8Config(QuantizationConfig):
         from sglang.srt.layers.linear import LinearBase
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
         from sglang.srt.layers.radix_attention import RadixAttention
+        from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 
-        if isinstance(layer, LinearBase):
+        quantize_head = (
+            envs.SGLANG_FP8_QUANT_LM_HEAD.get()
+            and isinstance(layer, ParallelLMHead)
+            and not self.is_checkpoint_fp8_serialized
+        )
+        if isinstance(layer, LinearBase) or quantize_head:
             if is_layer_skipped(
                 prefix, self.ignored_layers, fused_mapping=self.packed_modules_mapping
             ):
