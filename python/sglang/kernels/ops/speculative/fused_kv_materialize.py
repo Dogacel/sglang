@@ -290,6 +290,10 @@ class FusedKVMaterializeHelper:
         self._v_workspace: Optional[torch.Tensor] = None
 
         kv_weights = []
+        kv_scales = []
+        self.fp8_projection = (
+            layers[0].self_attn.qkv_proj.weight.dtype == torch.float8_e4m3fn
+        )
         k_norm_weights = []
         eps_values = []
 
@@ -320,7 +324,22 @@ class FusedKVMaterializeHelper:
                 )
 
             qkv_w = attn.qkv_proj.weight
-            kv_weight = qkv_w[attn.q_size : attn.q_size + 2 * attn.kv_size]
+            if self.fp8_projection:
+                from sglang.srt.speculative.dflash_utils import can_dflash_fuse_fp8_qkv
+
+                if not can_dflash_fuse_fp8_qkv(attn.qkv_proj):
+                    raise ValueError(
+                        "Incompatible FP8 QKV layout for stacked KV projection"
+                    )
+                if attn.v_scale is not None:
+                    raise ValueError(
+                        "Scaled V is not supported by fused FP8 KV projection"
+                    )
+                kv_slice = slice(attn.q_size, attn.q_size + 2 * attn.kv_size)
+                kv_weight = qkv_w[:, kv_slice].t()
+                kv_scales.append(attn.qkv_proj.weight_scale.reshape(-1)[kv_slice])
+            else:
+                kv_weight = qkv_w[attn.q_size : attn.q_size + 2 * attn.kv_size]
             kv_weights.append(kv_weight)
             k_norm_weights.append(attn.k_norm.weight)
             eps_values.append(float(attn.k_norm.variance_epsilon))
@@ -328,7 +347,12 @@ class FusedKVMaterializeHelper:
         flat_kv_weight = torch.stack(kv_weights).reshape(
             self.n_layers * self.layer_out_dim, -1
         )
-        self.flat_kv_weight_t = flat_kv_weight.transpose(0, 1).contiguous()
+        if self.fp8_projection:
+            # CUTLASS consumes column-major [input, output] FP8 weights.
+            self.flat_kv_weight_t = flat_kv_weight.transpose(0, 1)
+            self.flat_kv_weight_scale = torch.cat(kv_scales).reshape(1, -1).contiguous()
+        else:
+            self.flat_kv_weight_t = flat_kv_weight.transpose(0, 1).contiguous()
         self.k_norm_weights = torch.stack(k_norm_weights).contiguous()
         self.eps_values = torch.tensor(
             eps_values, dtype=torch.float32, device=self.device
@@ -407,7 +431,7 @@ class FusedKVMaterializeHelper:
 
         if ctx_hidden.device != self.device:
             ctx_hidden = ctx_hidden.to(self.device, non_blocking=True)
-        if ctx_hidden.dtype != self.flat_kv_weight_t.dtype:
+        if not self.fp8_projection and ctx_hidden.dtype != self.flat_kv_weight_t.dtype:
             ctx_hidden = ctx_hidden.to(self.flat_kv_weight_t.dtype)
         if positions.device != self.device:
             positions = positions.to(
@@ -429,7 +453,17 @@ class FusedKVMaterializeHelper:
         assert self._v_workspace is not None
 
         proj_out_2d = self._proj_workspace[:total_ctx]
-        if self._mm_out_supported:
+        if self.fp8_projection:
+            from sglang.srt.layers.quantization.fp8_utils import apply_fp8_linear
+
+            proj_out_2d = apply_fp8_linear(
+                input=ctx_hidden,
+                weight=self.flat_kv_weight_t,
+                weight_scale=self.flat_kv_weight_scale,
+                input_scale=None,
+                cutlass_fp8_supported=True,
+            )
+        elif self._mm_out_supported:
             try:
                 torch.mm(ctx_hidden, self.flat_kv_weight_t, out=proj_out_2d)
             except Exception:

@@ -1004,6 +1004,7 @@ class Envs:
     SGLANG_FP8_IGNORED_LAYERS = EnvStr("")
     # Opt-in online FP8 experiments; defaults preserve checkpoint behavior.
     SGLANG_FP8_QUANT_LM_HEAD = EnvBool(False)
+    SGLANG_DFLASH_FP8_FUSED_KV = EnvBool(False)
     SGLANG_FP4_IGNORED_LAYERS = EnvStr("")
     # On by default; set SGLANG_ENABLE_FP8_GEMM_CONFIG_TUNE=0 as a kill switch.
     # Consults the tuned per-(N, K, M) Triton tile config table in

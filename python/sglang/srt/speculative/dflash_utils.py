@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from sglang.srt.environ import envs
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.layers.sampler import (
     apply_custom_logit_processor,
@@ -856,10 +857,33 @@ def can_dflash_slice_qkv_weight(qkv_proj: Any) -> Tuple[bool, str]:
     return True, ""
 
 
+def can_dflash_fuse_fp8_qkv(qkv_proj: Any) -> bool:
+    """Only the online channelwise FP8 layout is safe to slice and concatenate."""
+    from sglang.srt.layers.quantization.fp8 import Fp8LinearMethod
+
+    method = getattr(qkv_proj, "quant_method", None)
+    weight = getattr(qkv_proj, "weight", None)
+    scale = getattr(qkv_proj, "weight_scale", None)
+    return (
+        envs.SGLANG_DFLASH_FP8_FUSED_KV.get()
+        and isinstance(method, Fp8LinearMethod)
+        and not method.block_quant
+        and not method.use_marlin
+        and method.cutlass_fp8_supported
+        and getattr(qkv_proj, "input_scale", None) is None
+        and weight is not None
+        and weight.dtype == torch.float8_e4m3fn
+        and weight.ndim == 2
+        and weight.stride(0) == 1
+        and scale is not None
+        and scale.numel() == weight.shape[1]
+    )
+
+
 def can_dflash_use_fused_qkv_proj(qkv_proj: Any) -> Tuple[bool, str]:
     """Validate whether a QKV layer is eligible for DFlash fused KV materialization."""
     eligible, reason = can_dflash_slice_qkv_weight(qkv_proj)
-    if not eligible:
+    if not eligible and not can_dflash_fuse_fp8_qkv(qkv_proj):
         return False, reason
     if getattr(qkv_proj, "bias", None) is not None:
         return False, "qkv bias is not supported for fused KV path"
